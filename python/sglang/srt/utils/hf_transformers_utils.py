@@ -636,6 +636,7 @@ def get_tokenizer(
         tokenizer_name = client.get_local_dir()
 
     # Check if tokenizer files are already in local cache (CI only)
+    original_tokenizer_name = tokenizer_name
     tokenizer_name = _check_tokenizer_cache(
         tokenizer_name, kwargs.get("cache_dir"), tokenizer_revision
     )
@@ -653,14 +654,45 @@ def get_tokenizer(
         logging.getLogger(tokenizer.__class__.__module__).addFilter(
             TokenizerWarningsFilter()
         )
-    except TypeError as e:
-        # The LLaMA tokenizer causes a protobuf error in some environments.
-        err_msg = (
-            "Failed to load the tokenizer. If you are using a LLaMA V1 model "
-            f"consider using '{_FAST_LLAMA_TOKENIZER}' instead of the "
-            "original tokenizer."
-        )
-        raise RuntimeError(err_msg) from e
+    except (TypeError, OSError, FileNotFoundError) as e:
+        # Layer 3: If we used a cached path and got a file error, the cache may be corrupted
+        # Try again with force_download to bypass the cache
+        if tokenizer_name != original_tokenizer_name and (
+            isinstance(e, (OSError, FileNotFoundError))
+            or (isinstance(e, TypeError) and "NoneType" in str(e))
+        ):
+            logger.warning(
+                "Failed to load tokenizer from cached path %s: %s. "
+                "Retrying with force_download to bypass potentially corrupted cache.",
+                tokenizer_name,
+                e,
+            )
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    original_tokenizer_name,
+                    *args,
+                    trust_remote_code=trust_remote_code,
+                    tokenizer_revision=tokenizer_revision,
+                    clean_up_tokenization_spaces=False,
+                    force_download=True,
+                    **kwargs,
+                )
+                logging.getLogger(tokenizer.__class__.__module__).addFilter(
+                    TokenizerWarningsFilter()
+                )
+            except Exception:
+                # If force_download also fails, fall through to original error handling
+                raise e
+        elif isinstance(e, TypeError):
+            # The LLaMA tokenizer causes a protobuf error in some environments.
+            err_msg = (
+                "Failed to load the tokenizer. If you are using a LLaMA V1 model "
+                f"consider using '{_FAST_LLAMA_TOKENIZER}' instead of the "
+                "original tokenizer."
+            )
+            raise RuntimeError(err_msg) from e
+        else:
+            raise e
     except ValueError as e:
         # If the error pertains to the tokenizer class not existing or not
         # currently being imported, suggest using the --trust-remote-code flag.
