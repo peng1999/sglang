@@ -657,9 +657,8 @@ def get_tokenizer(
     except (TypeError, OSError, FileNotFoundError) as e:
         # Layer 3: If we used a cached path and got a file error, the cache may be corrupted
         # Try again with force_download to bypass the cache
-        if tokenizer_name != original_tokenizer_name and (
-            isinstance(e, (OSError, FileNotFoundError))
-            or (isinstance(e, TypeError) and "NoneType" in str(e))
+        if tokenizer_name != original_tokenizer_name and isinstance(
+            e, (TypeError, OSError, FileNotFoundError)
         ):
             logger.warning(
                 "Failed to load tokenizer from cached path %s: %s. "
