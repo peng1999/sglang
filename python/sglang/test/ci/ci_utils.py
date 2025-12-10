@@ -57,27 +57,21 @@ def write_failure_summary_to_github(failure_details: List["TestFailureInfo"]) ->
         summary_lines.append(f"**Reason:** {failure.reason}\n\n")
 
         if failure.error_lines:
-            # Show key error lines
-            summary_lines.append("**Key Error Lines:**\n")
+            # Show key error lines in collapsible section
+            summary_lines.append(f"<details>\n")
+            summary_lines.append(
+                f"<summary>🔍 Key Error Lines (click to expand)</summary>\n\n"
+            )
             summary_lines.append("```python\n")
-            for line in failure.error_lines[:30]:  # Limit to first 30 lines
+            for line in failure.error_lines[:50]:  # Limit to first 50 lines
                 summary_lines.append(line + "\n")
-            if len(failure.error_lines) > 30:
+            if len(failure.error_lines) > 50:
                 summary_lines.append(
-                    f"... ({len(failure.error_lines) - 30} more lines)\n"
+                    f"... ({len(failure.error_lines) - 50} more lines omitted)\n"
                 )
             summary_lines.append("```\n\n")
+            summary_lines.append(f"</details>\n\n")
 
-        # Add link to full logs
-        summary_lines.append(f"<details>\n")
-        summary_lines.append(
-            f"<summary>📋 See full logs (click to expand)</summary>\n\n"
-        )
-        summary_lines.append(
-            f"Full logs are available in the GitHub Actions workflow output.\n"
-        )
-        summary_lines.append(f"Search for: `python3 {failure.filename}`\n")
-        summary_lines.append(f"</details>\n\n")
         summary_lines.append("---\n\n")
 
     # Write to GitHub Step Summary
@@ -86,6 +80,50 @@ def write_failure_summary_to_github(failure_details: List["TestFailureInfo"]) ->
             f.writelines(summary_lines)
     except Exception as e:
         print(f"Warning: Failed to write to GitHub Step Summary: {e}", flush=True)
+
+
+def extract_main_error_message(stderr: str, stdout: str) -> str:
+    """Extract the main error message from output.
+
+    Returns a concise error message like "TypeError: expected str, bytes..."
+    or "AssertionError: a.shape[1] >= 256" instead of just "exit code 1"
+    """
+    combined_output = stderr + "\n" + stdout
+    lines = combined_output.split("\n")
+
+    # Common Python error types to look for (in order of priority)
+    error_types = [
+        "AssertionError",
+        "TypeError",
+        "ValueError",
+        "FileNotFoundError",
+        "RuntimeError",
+        "KeyError",
+        "AttributeError",
+        "ImportError",
+        "IndexError",
+        "MemoryError",
+        "Exception",
+    ]
+
+    # Look for the last occurrence of these errors (usually the root cause)
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i].strip()
+        for error_type in error_types:
+            if line.startswith(error_type + ":") or line.startswith(error_type):
+                # Extract the error message (limit to 150 chars)
+                error_msg = line[:150]
+                if len(line) > 150:
+                    error_msg += "..."
+                return error_msg
+
+    # Fallback: look for "ERROR:" or "FAILED" messages
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i].strip()
+        if "ERROR:" in line or "FAILED" in line:
+            return line[:150]
+
+    return "exit code non-zero (see error lines below)"
 
 
 def extract_error_lines(stderr: str, stdout: str, max_lines: int = 50) -> List[str]:
@@ -255,16 +293,19 @@ def run_unittest_files(
                 # Extract error lines from captured output
                 error_lines = extract_error_lines(captured_stderr, captured_stdout)
 
+                # Extract main error message for better visibility
+                error_msg = extract_main_error_message(captured_stderr, captured_stdout)
+
                 # Create failure info
                 failure_info = TestFailureInfo(
                     filename=filename,
-                    reason=f"exit code {ret_code}",
+                    reason=error_msg,
                     stderr=captured_stderr,
                     stdout=captured_stdout,
                     error_lines=error_lines,
                 )
                 failure_details.append(failure_info)
-                failed_tests.append((filename, f"exit code {ret_code}"))
+                failed_tests.append((filename, error_msg))
 
                 if not continue_on_error:
                     # Stop at first failure for PR tests
