@@ -53,21 +53,41 @@ def write_failure_summary_to_github(failure_details: List["TestFailureInfo"]) ->
         # Extract just the test filename (not full path)
         test_name = os.path.basename(failure.filename)
 
-        summary_lines.append(f"### {test_name}\n")
-        summary_lines.append(f"**Reason:** {failure.reason}\n\n")
+        summary_lines.append(f"### {test_name}\n\n")
+
+        # Extract file:line links from error lines
+        error_locations = []
+        for line in failure.error_lines:
+            # Look for patterns like: File "/path/file.py", line 123
+            match = re.search(r'File "([^"]+)", line (\d+)', line)
+            if match:
+                file_path, line_num = match.groups()
+                # Create clickable link (works in GitHub Actions)
+                error_locations.append(
+                    f"[{os.path.basename(file_path)}:{line_num}]({file_path}#L{line_num})"
+                )
+
+        # Show file:line links if found
+        if error_locations:
+            # Show up to 3 most relevant locations
+            summary_lines.append("**Error Locations:** ")
+            summary_lines.append(" → ".join(error_locations[-3:]))
+            summary_lines.append("\n\n")
 
         if failure.error_lines:
             # Show key error lines in collapsible section
             summary_lines.append(f"<details>\n")
             summary_lines.append(
-                f"<summary>🔍 Key Error Lines (click to expand)</summary>\n\n"
+                f"<summary>🔍 Error Details (click to expand)</summary>\n\n"
             )
             summary_lines.append("```python\n")
-            for line in failure.error_lines[:50]:  # Limit to first 50 lines
+            for line in failure.error_lines[
+                :100
+            ]:  # Show more lines now that noise is filtered
                 summary_lines.append(line + "\n")
-            if len(failure.error_lines) > 50:
+            if len(failure.error_lines) > 100:
                 summary_lines.append(
-                    f"... ({len(failure.error_lines) - 50} more lines omitted)\n"
+                    f"... ({len(failure.error_lines) - 100} more lines omitted)\n"
                 )
             summary_lines.append("```\n\n")
             summary_lines.append(f"</details>\n\n")
@@ -126,14 +146,13 @@ def extract_main_error_message(stderr: str, stdout: str) -> str:
     return "exit code non-zero (see error lines below)"
 
 
-def extract_error_lines(stderr: str, stdout: str, max_lines: int = 50) -> List[str]:
+def extract_error_lines(stderr: str, stdout: str, max_lines: int = 100) -> List[str]:
     """Extract key error lines from stderr/stdout.
 
-    Looks for patterns like:
-    - Traceback (most recent call last):
-    - Exception/Error: messages
-    - AssertionError, RuntimeError, etc.
-    - Failed/ERROR log lines
+    Focuses on actual errors and exceptions, filtering out noise like:
+    - Init torch distributed
+    - Ignore import error
+    - Load weight begin
 
     Returns up to max_lines of the most relevant error context.
     """
@@ -141,54 +160,87 @@ def extract_error_lines(stderr: str, stdout: str, max_lines: int = 50) -> List[s
     combined_output = stderr + "\n" + stdout
     lines = combined_output.split("\n")
 
-    # Pattern to identify error-related lines
-    error_patterns = [
+    # Patterns to SKIP (noise that's not actual errors)
+    noise_patterns = [
+        r"Init torch distributed",
+        r"Ignore import error when loading",
+        r"Load weight begin",
+        r"avail mem=",
+        r"mem usage=",
+        r"is connected to \d+ peer ranks",
+        r"torch_dtype.*is deprecated",
+        r"Using model weights format",
+        r"Found local HF snapshot",
+    ]
+
+    # Critical error patterns to capture
+    critical_patterns = [
         r"Traceback \(most recent call last\):",
-        r"\w*Error:",  # Catches AssertionError, RuntimeError, ValueError, etc.
-        r"\w*Exception:",
+        r"ERROR:",
         r"FAILED",
-        r"ERROR",
-        r"Failed to",
+        r"AssertionError",
+        r"TimeoutError",
+        r"RuntimeError",
+        r"Exception:",
+        r"Scheduler hit an exception:",
+        r"Server process exited",
+        r"assert .* >=",
         r"raise \w+Error",
     ]
 
-    # Find lines matching error patterns and collect context
+    def is_noise(line: str) -> bool:
+        """Check if line is noise that should be filtered out."""
+        return any(
+            re.search(pattern, line, re.IGNORECASE) for pattern in noise_patterns
+        )
+
+    def is_critical(line: str) -> bool:
+        """Check if line contains critical error information."""
+        return any(
+            re.search(pattern, line, re.IGNORECASE) for pattern in critical_patterns
+        )
+
+    # Find critical error sections
     i = 0
     while i < len(lines) and len(error_lines) < max_lines:
         line = lines[i]
 
-        # Check if this line matches an error pattern
-        if any(re.search(pattern, line, re.IGNORECASE) for pattern in error_patterns):
-            # Found an error - collect this line and context around it
+        # Skip noise lines
+        if is_noise(line):
+            i += 1
+            continue
 
+        # Check for critical error patterns
+        if is_critical(line):
             # If it's a traceback, capture the full traceback
             if "Traceback (most recent call last):" in line:
                 error_lines.append(line)
                 i += 1
                 # Continue collecting lines until we hit the final exception line
                 while i < len(lines) and len(error_lines) < max_lines:
-                    error_lines.append(lines[i])
+                    # Skip noise even within tracebacks
+                    if not is_noise(lines[i]):
+                        error_lines.append(lines[i])
+
                     # Stop after the final exception message
                     if re.match(r"\w+Error:", lines[i]) or re.match(
                         r"\w+Exception:", lines[i]
                     ):
-                        # Collect one more line if it's the exception message
-                        if i + 1 < len(lines) and not lines[i + 1].strip().startswith(
-                            "File "
-                        ):
-                            i += 1
-                            if i < len(lines):
-                                error_lines.append(lines[i])
+                        # Collect a few more lines after the exception for context
+                        for j in range(i + 1, min(i + 4, len(lines))):
+                            if not is_noise(lines[j]) and lines[j].strip():
+                                error_lines.append(lines[j])
                         break
                     i += 1
             else:
-                # For other errors, collect a few lines of context
-                # Add 2 lines before (if available)
-                start = max(0, i - 2)
-                for j in range(start, min(i + 3, len(lines))):
-                    if len(error_lines) < max_lines:
-                        error_lines.append(lines[j])
-                i += 3
+                # For other critical errors, collect context (5 lines before and after)
+                start = max(0, i - 5)
+                end = min(i + 6, len(lines))
+                for j in range(start, end):
+                    if not is_noise(lines[j]) and lines[j].strip():
+                        if len(error_lines) < max_lines:
+                            error_lines.append(lines[j])
+                i += 6
         else:
             i += 1
 
