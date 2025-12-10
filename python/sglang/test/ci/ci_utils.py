@@ -55,25 +55,6 @@ def write_failure_summary_to_github(failure_details: List["TestFailureInfo"]) ->
 
         summary_lines.append(f"### {test_name}\n\n")
 
-        # Extract file:line links from error lines
-        error_locations = []
-        for line in failure.error_lines:
-            # Look for patterns like: File "/path/file.py", line 123
-            match = re.search(r'File "([^"]+)", line (\d+)', line)
-            if match:
-                file_path, line_num = match.groups()
-                # Create clickable link (works in GitHub Actions)
-                error_locations.append(
-                    f"[{os.path.basename(file_path)}:{line_num}]({file_path}#L{line_num})"
-                )
-
-        # Show file:line links if found
-        if error_locations:
-            # Show up to 3 most relevant locations
-            summary_lines.append("**Error Locations:** ")
-            summary_lines.append(" → ".join(error_locations[-3:]))
-            summary_lines.append("\n\n")
-
         if failure.error_lines:
             # Show key error lines in collapsible section
             summary_lines.append(f"<details>\n")
