@@ -599,6 +599,35 @@ def _check_tokenizer_cache(
     return local_path if local_path is not None else tokenizer_name
 
 
+def _handle_tokenizer_load_error(e: Exception, trust_remote_code: bool) -> None:
+    """Handle tokenizer loading errors with helpful messages."""
+    if isinstance(e, TypeError):
+        # The LLaMA tokenizer causes a protobuf error in some environments.
+        err_msg = (
+            "Failed to load the tokenizer. If you are using a LLaMA V1 model "
+            f"consider using '{_FAST_LLAMA_TOKENIZER}' instead of the "
+            "original tokenizer."
+        )
+        raise RuntimeError(err_msg) from e
+    elif (
+        isinstance(e, ValueError)
+        and not trust_remote_code
+        and (
+            "does not exist or is not currently imported." in str(e)
+            or "requires you to execute the tokenizer file" in str(e)
+        )
+    ):
+        err_msg = (
+            "Failed to load the tokenizer. If the tokenizer is a custom "
+            "tokenizer not yet available in the HuggingFace transformers "
+            "library, consider setting `trust_remote_code=True` in LLM "
+            "or using the `--trust-remote-code` flag in the CLI."
+        )
+        raise RuntimeError(err_msg) from e
+    else:
+        raise e
+
+
 def get_tokenizer(
     tokenizer_name: str,
     *args,
@@ -641,25 +670,24 @@ def get_tokenizer(
         tokenizer_name, kwargs.get("cache_dir"), tokenizer_revision
     )
 
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(
-            tokenizer_name,
-            *args,
-            trust_remote_code=trust_remote_code,
-            tokenizer_revision=tokenizer_revision,
-            clean_up_tokenization_spaces=False,
-            **kwargs,
-        )
-        # Filter tokenizer warnings
-        logging.getLogger(tokenizer.__class__.__module__).addFilter(
-            TokenizerWarningsFilter()
-        )
-    except Exception as e:
-        # Layer 3: If we used a cached path and loading failed, the cache may be corrupted
-        # Try again with force_download to bypass the cache
-        if (
-            tokenizer_name != original_tokenizer_name
-        ):  # Preventing force download on a local path
+    # Layer 3: Separate handling for cached vs non-cached paths
+    if tokenizer_name != original_tokenizer_name:
+        # We're using a cached path, try it but fallback to force_download if it fails
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                tokenizer_name,
+                *args,
+                trust_remote_code=trust_remote_code,
+                tokenizer_revision=tokenizer_revision,
+                clean_up_tokenization_spaces=False,
+                **kwargs,
+            )
+            # Filter tokenizer warnings
+            logging.getLogger(tokenizer.__class__.__module__).addFilter(
+                TokenizerWarningsFilter()
+            )
+        except Exception as e:
+            # Cache load failed, retry with force_download to bypass corrupted cache
             logger.warning(
                 "Failed to load tokenizer from cached path %s: %s. "
                 "Retrying with force_download to bypass potentially corrupted cache.",
@@ -676,40 +704,30 @@ def get_tokenizer(
                     force_download=True,
                     **kwargs,
                 )
+                # Filter tokenizer warnings
                 logging.getLogger(tokenizer.__class__.__module__).addFilter(
                     TokenizerWarningsFilter()
                 )
             except Exception:
-                # If force_download also fails, fall through to error handling below
-                pass
-
-        # Handle specific error types with helpful messages
-        if isinstance(e, TypeError):
-            # The LLaMA tokenizer causes a protobuf error in some environments.
-            err_msg = (
-                "Failed to load the tokenizer. If you are using a LLaMA V1 model "
-                f"consider using '{_FAST_LLAMA_TOKENIZER}' instead of the "
-                "original tokenizer."
+                # Force download also failed, handle with helpful error messages
+                _handle_tokenizer_load_error(e, trust_remote_code)
+    else:
+        # No cache, load normally with error handling
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                tokenizer_name,
+                *args,
+                trust_remote_code=trust_remote_code,
+                tokenizer_revision=tokenizer_revision,
+                clean_up_tokenization_spaces=False,
+                **kwargs,
             )
-            raise RuntimeError(err_msg) from e
-        else:
-            raise e
-    except ValueError as e:
-        # If the error pertains to the tokenizer class not existing or not
-        # currently being imported, suggest using the --trust-remote-code flag.
-        if not trust_remote_code and (
-            "does not exist or is not currently imported." in str(e)
-            or "requires you to execute the tokenizer file" in str(e)
-        ):
-            err_msg = (
-                "Failed to load the tokenizer. If the tokenizer is a custom "
-                "tokenizer not yet available in the HuggingFace transformers "
-                "library, consider setting `trust_remote_code=True` in LLM "
-                "or using the `--trust-remote-code` flag in the CLI."
+            # Filter tokenizer warnings
+            logging.getLogger(tokenizer.__class__.__module__).addFilter(
+                TokenizerWarningsFilter()
             )
-            raise RuntimeError(err_msg) from e
-        else:
-            raise e
+        except Exception as e:
+            _handle_tokenizer_load_error(e, trust_remote_code)
 
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
         warnings.warn(
