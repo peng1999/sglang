@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import threading
 import time
@@ -12,6 +13,148 @@ from sglang.srt.utils.common import kill_process_tree
 class TestFile:
     name: str
     estimated_time: float = 60
+
+
+@dataclass
+class TestFailureInfo:
+    """Information about a test failure."""
+
+    filename: str
+    reason: str
+    stderr: str = ""
+    stdout: str = ""
+    error_lines: List[str] = None
+
+    def __post_init__(self):
+        if self.error_lines is None:
+            self.error_lines = []
+
+
+def write_failure_summary_to_github(failure_details: List["TestFailureInfo"]) -> None:
+    """Write test failure summary to GitHub Step Summary.
+
+    Args:
+        failure_details: List of TestFailureInfo objects containing error information
+    """
+    if not failure_details:
+        return
+
+    # Check if we're in GitHub Actions
+    github_summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not github_summary_path:
+        return
+
+    # Build markdown summary
+    summary_lines = []
+    summary_lines.append("## ❌ Test Failures\n")
+    summary_lines.append(f"**{len(failure_details)} test(s) failed**\n\n")
+
+    for failure in failure_details:
+        # Extract just the test filename (not full path)
+        test_name = os.path.basename(failure.filename)
+
+        summary_lines.append(f"### {test_name}\n")
+        summary_lines.append(f"**Reason:** {failure.reason}\n\n")
+
+        if failure.error_lines:
+            # Show key error lines
+            summary_lines.append("**Key Error Lines:**\n")
+            summary_lines.append("```python\n")
+            for line in failure.error_lines[:30]:  # Limit to first 30 lines
+                summary_lines.append(line + "\n")
+            if len(failure.error_lines) > 30:
+                summary_lines.append(
+                    f"... ({len(failure.error_lines) - 30} more lines)\n"
+                )
+            summary_lines.append("```\n\n")
+
+        # Add link to full logs
+        summary_lines.append(f"<details>\n")
+        summary_lines.append(
+            f"<summary>📋 See full logs (click to expand)</summary>\n\n"
+        )
+        summary_lines.append(
+            f"Full logs are available in the GitHub Actions workflow output.\n"
+        )
+        summary_lines.append(f"Search for: `python3 {failure.filename}`\n")
+        summary_lines.append(f"</details>\n\n")
+        summary_lines.append("---\n\n")
+
+    # Write to GitHub Step Summary
+    try:
+        with open(github_summary_path, "a") as f:
+            f.writelines(summary_lines)
+    except Exception as e:
+        print(f"Warning: Failed to write to GitHub Step Summary: {e}", flush=True)
+
+
+def extract_error_lines(stderr: str, stdout: str, max_lines: int = 50) -> List[str]:
+    """Extract key error lines from stderr/stdout.
+
+    Looks for patterns like:
+    - Traceback (most recent call last):
+    - Exception/Error: messages
+    - AssertionError, RuntimeError, etc.
+    - Failed/ERROR log lines
+
+    Returns up to max_lines of the most relevant error context.
+    """
+    error_lines = []
+    combined_output = stderr + "\n" + stdout
+    lines = combined_output.split("\n")
+
+    # Pattern to identify error-related lines
+    error_patterns = [
+        r"Traceback \(most recent call last\):",
+        r"\w*Error:",  # Catches AssertionError, RuntimeError, ValueError, etc.
+        r"\w*Exception:",
+        r"FAILED",
+        r"ERROR",
+        r"Failed to",
+        r"raise \w+Error",
+    ]
+
+    # Find lines matching error patterns and collect context
+    i = 0
+    while i < len(lines) and len(error_lines) < max_lines:
+        line = lines[i]
+
+        # Check if this line matches an error pattern
+        if any(re.search(pattern, line, re.IGNORECASE) for pattern in error_patterns):
+            # Found an error - collect this line and context around it
+
+            # If it's a traceback, capture the full traceback
+            if "Traceback (most recent call last):" in line:
+                error_lines.append(line)
+                i += 1
+                # Continue collecting lines until we hit the final exception line
+                while i < len(lines) and len(error_lines) < max_lines:
+                    error_lines.append(lines[i])
+                    # Stop after the final exception message
+                    if re.match(r"\w+Error:", lines[i]) or re.match(
+                        r"\w+Exception:", lines[i]
+                    ):
+                        # Collect one more line if it's the exception message
+                        if i + 1 < len(lines) and not lines[i + 1].strip().startswith(
+                            "File "
+                        ):
+                            i += 1
+                            if i < len(lines):
+                                error_lines.append(lines[i])
+                        break
+                    i += 1
+            else:
+                # For other errors, collect a few lines of context
+                # Add 2 lines before (if available)
+                start = max(0, i - 2)
+                for j in range(start, min(i + 3, len(lines))):
+                    if len(error_lines) < max_lines:
+                        error_lines.append(lines[j])
+                i += 3
+        else:
+            i += 1
+
+    return error_lines
 
 
 def run_with_timeout(
@@ -54,13 +197,16 @@ def run_unittest_files(
     success = True
     passed_tests = []
     failed_tests = []
+    failure_details = []  # List of TestFailureInfo objects
 
     for i, file in enumerate(files):
         filename, estimated_time = file.name, file.estimated_time
         process = None
+        captured_stdout = ""
+        captured_stderr = ""
 
         def run_one_file(filename):
-            nonlocal process
+            nonlocal process, captured_stdout, captured_stderr
 
             filename = os.path.join(os.getcwd(), filename)
             print(
@@ -69,10 +215,24 @@ def run_unittest_files(
             )
             tic = time.perf_counter()
 
+            # Capture stdout and stderr while also displaying to console
             process = subprocess.Popen(
-                ["python3", filename], stdout=None, stderr=None, env=os.environ
+                ["python3", filename],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=os.environ,
+                text=True,  # Return output as strings instead of bytes
             )
-            process.wait()
+
+            # Wait for process to complete and get output (calls wait() internally)
+            captured_stdout, captured_stderr = process.communicate()
+
+            # Print to console (preserving original behavior)
+            if captured_stdout:
+                print(captured_stdout, end="", flush=True)
+            if captured_stderr:
+                print(captured_stderr, end="", flush=True)
+
             elapsed = time.perf_counter() - tic
 
             print(
@@ -91,7 +251,21 @@ def run_unittest_files(
                     flush=True,
                 )
                 success = False
+
+                # Extract error lines from captured output
+                error_lines = extract_error_lines(captured_stderr, captured_stdout)
+
+                # Create failure info
+                failure_info = TestFailureInfo(
+                    filename=filename,
+                    reason=f"exit code {ret_code}",
+                    stderr=captured_stderr,
+                    stdout=captured_stdout,
+                    error_lines=error_lines,
+                )
+                failure_details.append(failure_info)
                 failed_tests.append((filename, f"exit code {ret_code}"))
+
                 if not continue_on_error:
                     # Stop at first failure for PR tests
                     break
@@ -106,7 +280,18 @@ def run_unittest_files(
                 flush=True,
             )
             success = False
+
+            # Create failure info for timeout
+            failure_info = TestFailureInfo(
+                filename=filename,
+                reason=f"timeout after {timeout_per_file}s",
+                stderr=captured_stderr,
+                stdout=captured_stdout,
+                error_lines=[],
+            )
+            failure_details.append(failure_info)
             failed_tests.append((filename, f"timeout after {timeout_per_file}s"))
+
             if not continue_on_error:
                 # Stop at first timeout for PR tests
                 break
@@ -130,5 +315,9 @@ def run_unittest_files(
         for test, reason in failed_tests:
             print(f"  {test} ({reason})", flush=True)
     print(f"{'='*60}\n", flush=True)
+
+    # Write failure summary to GitHub Actions Step Summary
+    if failure_details:
+        write_failure_summary_to_github(failure_details)
 
     return 0 if success else -1
