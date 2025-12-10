@@ -15,10 +15,26 @@ from urllib.request import Request, urlopen
 
 def is_rate_limit_error(e):
     """Check if an exception is a rate limit error"""
+    if not isinstance(e, HTTPError):
+        return False
+
+    # Check HTTP status codes that indicate rate limiting
+    if e.code not in [403, 429]:
+        return False
+
+    # Try to read error body if not already attached
+    error_body = getattr(e, "error_body", "")
+    if not error_body:
+        try:
+            error_body = e.read().decode("utf-8")
+            e.error_body = error_body
+        except Exception:
+            error_body = ""
+
+    # Check if the error message contains rate limit indicators
     return (
-        isinstance(e, HTTPError)
-        and e.code in [403, 429]
-        and "rate limit exceeded" in getattr(e, "error_body", "").lower()
+        "rate limit" in error_body.lower()
+        or "api rate limit exceeded" in error_body.lower()
     )
 
 
@@ -65,6 +81,14 @@ def verify_token_permissions(repo_owner, repo_name, token):
         repo_data = json.loads(response)
         print(f"Repository access verified: {repo_data['full_name']}")
     except Exception as e:
+        # Debug: check what error_body contains
+        error_body = getattr(e, "error_body", "")
+        print(f"DEBUG: error_body = {error_body}")
+        print(f"DEBUG: is HTTPError? {isinstance(e, HTTPError)}")
+        if isinstance(e, HTTPError):
+            print(f"DEBUG: error code = {e.code}")
+        print(f"DEBUG: is_rate_limit_error result = {is_rate_limit_error(e)}")
+
         if is_rate_limit_error(e):
             warnings.warn("GitHub API rate limit exceeded during token verification.")
             return "rate_limited"
