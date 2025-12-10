@@ -427,9 +427,6 @@ class Scheduler(
                 f"{'available_cpu_mem' if self.device == 'cpu' else 'available_gpu_mem'}={avail_mem:.2f} GB"
             )
 
-        # Init metrics stats
-        self.init_metrics(tp_rank, pp_rank, dp_rank)
-
         # Init cache using the existing memory pool
         self.init_cache_with_memory_pool()
 
@@ -532,6 +529,9 @@ class Scheduler(
 
         if self.enable_kv_cache_events:
             self.init_kv_events(server_args.kv_events_config)
+
+        # Init metrics stats
+        self.init_metrics(tp_rank, pp_rank, dp_rank)
 
         if envs.SGLANG_LOG_GC.get():
             configure_gc_logger()

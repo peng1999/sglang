@@ -61,6 +61,10 @@ class SchedulerMetricsMixin:
 
         if self.enable_metrics:
             engine_type = "unified"
+            if self.disaggregation_mode == DisaggregationMode.PREFILL:
+                engine_type = "prefill"
+            elif self.disaggregation_mode == DisaggregationMode.DECODE:
+                engine_type = "decode"
             labels = {
                 "model_name": self.server_args.served_model_name,
                 "engine_type": engine_type,
@@ -160,7 +164,10 @@ class SchedulerMetricsMixin:
                 adder.log_hit_tokens / total_tokens if total_tokens > 0 else 0.0
             )
 
-            self.stats.num_running_reqs = running_bs
+            if self.disaggregation_mode == DisaggregationMode.PREFILL:
+                self.stats.num_running_reqs = len(can_run_list)
+            else:
+                self.stats.num_running_reqs = running_bs
             self.stats.num_running_reqs_offline_batch = running_bs_offline_batch
             self.stats.num_used_tokens = num_used
             self.stats.token_usage = token_usage
