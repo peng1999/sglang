@@ -654,8 +654,9 @@ def get_tokenizer(
         logging.getLogger(tokenizer.__class__.__module__).addFilter(
             TokenizerWarningsFilter()
         )
-    except (TypeError, OSError, FileNotFoundError) as e:
-        # Layer 3: If we used a cached path and got a file error, the cache may be corrupted
+    except Exception as e:
+        # Layer 3: If we used a cached path and loading failed, the cache may be corrupted
+        # Try again with force_download to bypass the cache
         if (
             tokenizer_name != original_tokenizer_name
         ):  # Preventing force download on a local path
@@ -681,7 +682,9 @@ def get_tokenizer(
             except Exception:
                 # If force_download also fails, fall through to original error handling
                 raise e
-        elif isinstance(e, TypeError):
+
+        # Handle specific error types with helpful messages
+        if isinstance(e, TypeError):
             # The LLaMA tokenizer causes a protobuf error in some environments.
             err_msg = (
                 "Failed to load the tokenizer. If you are using a LLaMA V1 model "
