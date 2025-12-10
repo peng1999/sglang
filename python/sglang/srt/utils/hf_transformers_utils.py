@@ -680,8 +680,8 @@ def get_tokenizer(
                     TokenizerWarningsFilter()
                 )
             except Exception:
-                # If force_download also fails, fall through to original error handling
-                raise e
+                # If force_download also fails, fall through to error handling below
+                pass
 
         # Handle specific error types with helpful messages
         if isinstance(e, TypeError):
