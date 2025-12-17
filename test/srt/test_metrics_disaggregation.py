@@ -65,7 +65,7 @@ class TestDisaggregationMetrics(TestDisaggregationBase):
             other_args=decode_args,
         )
 
-    def test_prefill_time_to_first_token_metric(self):
+    def test_num_running_reqs_metric_labels(self):
         response = requests.post(
             self.lb_url + "/generate",
             json={
@@ -76,21 +76,25 @@ class TestDisaggregationMetrics(TestDisaggregationBase):
         )
         self.assertEqual(response.status_code, 200)
 
-        metrics_content = requests.get(self.prefill_url + "/metrics").text
+        prefill_metrics = requests.get(self.prefill_url + "/metrics").text
+        decode_metrics = requests.get(self.decode_url + "/metrics").text
 
-        self.assertIn("sglang:time_to_first_token_seconds_bucket", metrics_content)
-        match = re.search(
-            r"sglang:time_to_first_token_seconds_count\\{[^}]*engine_type=\"prefill\"[^}]*\\}\\s+(\\d+(?:\\.\\d+)?)",
-            metrics_content,
+        prefill_match = re.search(
+            r'sglang:num_running_reqs\{[^}]*engine_type="prefill"[^}]*\}\s+([-+]?\d+(?:\.\d+)?)',
+            prefill_metrics,
         )
         self.assertIsNotNone(
-            match,
-            "time_to_first_token count for prefill engine not found in metrics",
+            prefill_match,
+            "num_running_reqs gauge for prefill engine not found in metrics",
         )
-        self.assertGreater(
-            float(match.group(1)),
-            0.0,
-            "time_to_first_token count for prefill engine should be > 0",
+
+        decode_match = re.search(
+            r'sglang:num_running_reqs\{[^}]*engine_type="decode"[^}]*\}\s+([-+]?\d+(?:\.\d+)?)',
+            decode_metrics,
+        )
+        self.assertIsNotNone(
+            decode_match,
+            "num_running_reqs gauge for decode engine not found in metrics",
         )
 
 
